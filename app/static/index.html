@@ -10,7 +10,6 @@
   .problem-card { border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 10px; cursor: pointer; }
   .problem-card:hover { background: #f7f7f7; }
   textarea { width: 100%; height: 260px; font-family: monospace; font-size: 0.95rem; padding: 10px; box-sizing: border-box; }
-  .criterion { border-top: 1px solid #eee; padding: 10px 0; }
   .score { font-weight: bold; }
   .status-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; color: white; }
   .PENDING, .EVALUATING { background: #d19a00; }
@@ -21,6 +20,20 @@
   table { width: 100%; border-collapse: collapse; }
   td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid #eee; }
   button.primary { background: #1a1a1a; color: white; border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+  button.link { background: none; border: none; color: #1a56db; cursor: pointer; padding: 0; font-size: 0.9rem; text-decoration: underline; }
+
+  .rubric-table td, .rubric-table th { padding: 8px 10px; }
+  .rubric-table th { background: #f7f7f7; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.03em; color: #555; }
+  .verdict-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.78rem; font-weight: 600; }
+  .verdict-strength { background: #e3f6e8; color: #1a8a3c; }
+  .verdict-weakness { background: #fbe9e7; color: #c0392b; }
+  .verdict-mixed { background: #fff4e0; color: #a66a00; }
+
+  .deep-dive { margin-top: 16px; border-top: 2px solid #eee; padding-top: 12px; }
+  .criterion-detail { border-top: 1px solid #eee; padding: 10px 0; }
+  .criterion-detail:first-child { border-top: none; }
+
+  .reopened-banner { background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.9rem; }
 </style>
 </head>
 <body>
@@ -38,6 +51,7 @@
 <section id="view-practice" class="hidden">
   <button onclick="showView('problems')">&larr; Back</button>
   <h2 id="practice-title"></h2>
+  <div id="reopened-banner" class="reopened-banner hidden"></div>
   <p id="practice-prompt" class="muted"></p>
   <p><strong>Requirements:</strong></p>
   <pre id="practice-requirements" class="muted"></pre>
@@ -64,6 +78,25 @@ let currentAttemptId = null;
 let currentProblem = null;
 let pollHandle = null;
 
+const CRITERION_LABELS = {
+  requirement_understanding: "Requirement Understanding",
+  class_responsibilities: "Class Responsibilities",
+  coupling_cohesion: "Coupling / Cohesion",
+  encapsulation_interfaces: "Encapsulation & Interfaces",
+  extensibility: "Extensibility",
+  edge_cases: "Edge Cases & Testability",
+};
+
+function criterionLabel(key) {
+  return CRITERION_LABELS[key] || key;
+}
+
+function verdictFor(score) {
+  if (score >= 4) return { label: "Strength", cls: "verdict-strength" };
+  if (score <= 2) return { label: "Weakness", cls: "verdict-weakness" };
+  return { label: "Mixed", cls: "verdict-mixed" };
+}
+
 function showView(name) {
   ['problems', 'practice', 'history'].forEach(v => {
     document.getElementById('view-' + v).classList.toggle('hidden', v !== name);
@@ -86,6 +119,13 @@ async function loadProblems() {
   });
 }
 
+function fillProblemPanel(problem) {
+  document.getElementById('practice-title').innerText = problem.title;
+  document.getElementById('practice-prompt').innerText = problem.prompt;
+  document.getElementById('practice-requirements').innerText = problem.requirements;
+  document.getElementById('practice-constraints').innerText = problem.constraints;
+}
+
 async function startAttempt(problem) {
   currentProblem = problem;
   const res = await fetch('/api/attempts', {
@@ -95,10 +135,8 @@ async function startAttempt(problem) {
   const attempt = await res.json();
   currentAttemptId = attempt.id;
 
-  document.getElementById('practice-title').innerText = problem.title;
-  document.getElementById('practice-prompt').innerText = problem.prompt;
-  document.getElementById('practice-requirements').innerText = problem.requirements;
-  document.getElementById('practice-constraints').innerText = problem.constraints;
+  fillProblemPanel(problem);
+  document.getElementById('reopened-banner').classList.add('hidden');
   document.getElementById('submission-text').value = '';
   document.getElementById('feedback-area').innerHTML = '';
   document.getElementById('submit-status').innerText = '';
@@ -133,25 +171,54 @@ async function pollEvaluation(submissionId) {
   }, 1500);
 }
 
+// Renders the AI's response as a scannable strengths/weaknesses table,
+// with a "deeper dive" toggle for the full per-criterion evidence,
+// concerns, and suggestions.
 function renderFeedback(ev) {
   const area = document.getElementById('feedback-area');
   let html = `<h3>Evaluation <span class="status-badge ${ev.status}">${ev.status}</span></h3>`;
+
   if (ev.status === 'FAILED') {
     html += `<p class="muted">${ev.error_message || 'Evaluation failed.'}</p>`;
   } else if (ev.status === 'COMPLETED') {
     html += `<p>${ev.overall_summary || ''}</p>`;
+
+    html += `<table class="rubric-table"><thead><tr>
+      <th>Criterion</th><th>Score</th><th>Verdict</th>
+    </tr></thead><tbody>`;
     ev.feedback_items.forEach(item => {
-      html += `<div class="criterion">
-        <div><strong>${item.criterion}</strong> — <span class="score">${item.score}/5</span></div>
+      const v = verdictFor(item.score);
+      html += `<tr>
+        <td>${criterionLabel(item.criterion)}</td>
+        <td class="score">${item.score}/5</td>
+        <td><span class="verdict-badge ${v.cls}">${v.label}</span></td>
+      </tr>`;
+    });
+    html += `</tbody></table>`;
+
+    html += `<p><button class="link" onclick="toggleDeepDive()">Show full breakdown &darr;</button></p>`;
+    html += `<div id="deep-dive" class="deep-dive hidden">`;
+    ev.feedback_items.forEach(item => {
+      html += `<div class="criterion-detail">
+        <div><strong>${criterionLabel(item.criterion)}</strong> — <span class="score">${item.score}/5</span></div>
         <div class="muted">Evidence: ${item.evidence}</div>
         ${item.concern ? `<div>Concern: ${item.concern}</div>` : ''}
         ${item.suggestion ? `<div>Suggestion: ${item.suggestion}</div>` : ''}
       </div>`;
     });
+    html += `</div>`;
   } else {
     html += `<p class="muted">Working on it...</p>`;
   }
   area.innerHTML = html;
+}
+
+function toggleDeepDive() {
+  const el = document.getElementById('deep-dive');
+  const btn = document.querySelector('#feedback-area button.link');
+  const opening = el.classList.contains('hidden');
+  el.classList.toggle('hidden');
+  if (btn) btn.innerText = opening ? 'Hide full breakdown ↑' : 'Show full breakdown ↓';
 }
 
 async function loadHistory() {
@@ -178,17 +245,45 @@ async function loadHistory() {
   });
 }
 
+
 async function reopenAttempt(attemptId, problemId) {
-  const res = await fetch(`/api/problems/${problemId}`);
-  const problem = await res.json();
+  const [problemRes, submissionsRes] = await Promise.all([
+    fetch(`/api/problems/${problemId}`),
+    fetch(`/api/attempts/${attemptId}/submissions`),
+  ]);
+  const problem = await problemRes.json();
+  const submissions = await submissionsRes.json();
+
   currentAttemptId = attemptId;
   currentProblem = problem;
-  document.getElementById('practice-title').innerText = problem.title;
-  document.getElementById('practice-prompt').innerText = problem.prompt;
-  document.getElementById('practice-requirements').innerText = problem.requirements;
-  document.getElementById('practice-constraints').innerText = problem.constraints;
-  document.getElementById('submission-text').value = '';
-  document.getElementById('feedback-area').innerHTML = '<p class="muted">Write a new attempt (retry) below, or check History for past results.</p>';
+  fillProblemPanel(problem);
+
+  const banner = document.getElementById('reopened-banner');
+  const feedbackArea = document.getElementById('feedback-area');
+  const textarea = document.getElementById('submission-text');
+
+  if (submissions.length === 0) {
+    banner.classList.add('hidden');
+    textarea.value = '';
+    feedbackArea.innerHTML = '<p class="muted">No submissions on this attempt yet.</p>';
+    showView('practice');
+    return;
+  }
+
+  const latest = submissions[submissions.length - 1];
+  textarea.value = latest.content;
+  banner.classList.remove('hidden');
+  banner.innerText = `Reviewing your v${latest.version} submission. Edit and press Submit to try again (this creates a new version).`;
+  feedbackArea.innerHTML = '<p class="muted">Loading feedback...</p>';
+
+  const evalRes = await fetch(`/api/attempts/${attemptId}/submissions/${latest.id}/evaluation`);
+  if (evalRes.status === 200) {
+    const ev = await evalRes.json();
+    renderFeedback(ev);
+  } else {
+    feedbackArea.innerHTML = '<p class="muted">No evaluation found for this submission.</p>';
+  }
+
   showView('practice');
 }
 
