@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>LLD Practice Platform</title>
+<style>
+  body { font-family: -apple-system, Segoe UI, sans-serif; max-width: 900px; margin: 40px auto; padding: 0 20px; color: #222; }
+  h1 { font-size: 1.4rem; }
+  nav button { margin-right: 8px; padding: 6px 14px; cursor: pointer; }
+  .problem-card { border: 1px solid #ddd; border-radius: 8px; padding: 14px; margin-bottom: 10px; cursor: pointer; }
+  .problem-card:hover { background: #f7f7f7; }
+  textarea { width: 100%; height: 260px; font-family: monospace; font-size: 0.95rem; padding: 10px; box-sizing: border-box; }
+  .criterion { border-top: 1px solid #eee; padding: 10px 0; }
+  .score { font-weight: bold; }
+  .status-badge { display: inline-block; padding: 2px 10px; border-radius: 12px; font-size: 0.8rem; color: white; }
+  .PENDING, .EVALUATING { background: #d19a00; }
+  .COMPLETED { background: #1a8a3c; }
+  .FAILED { background: #c0392b; }
+  .hidden { display: none; }
+  .muted { color: #777; font-size: 0.9rem; }
+  table { width: 100%; border-collapse: collapse; }
+  td, th { text-align: left; padding: 6px 4px; border-bottom: 1px solid #eee; }
+  button.primary { background: #1a1a1a; color: white; border: none; border-radius: 6px; padding: 8px 16px; cursor: pointer; }
+</style>
+</head>
+<body>
+<h1>LLD Practice Platform</h1>
+<nav>
+  <button onclick="showView('problems')">Problems</button>
+  <button onclick="showView('history')">History</button>
+</nav>
+
+<section id="view-problems">
+  <h2>Choose a problem</h2>
+  <div id="problem-list"></div>
+</section>
+
+<section id="view-practice" class="hidden">
+  <button onclick="showView('problems')">&larr; Back</button>
+  <h2 id="practice-title"></h2>
+  <p id="practice-prompt" class="muted"></p>
+  <p><strong>Requirements:</strong></p>
+  <pre id="practice-requirements" class="muted"></pre>
+  <p><strong>Constraints:</strong></p>
+  <pre id="practice-constraints" class="muted"></pre>
+  <textarea id="submission-text" placeholder="Describe your classes, their responsibilities, relationships, and reasoning..."></textarea>
+  <br><br>
+  <button class="primary" onclick="submitSolution()">Submit</button>
+  <span id="submit-status" class="muted"></span>
+
+  <div id="feedback-area"></div>
+</section>
+
+<section id="view-history" class="hidden">
+  <h2>Your attempt history</h2>
+  <table>
+    <thead><tr><th>Problem</th><th>Version</th><th>Status</th><th>Avg Score</th><th></th></tr></thead>
+    <tbody id="history-body"></tbody>
+  </table>
+</section>
+
+<script>
+let currentAttemptId = null;
+let currentProblem = null;
+let pollHandle = null;
+
+function showView(name) {
+  ['problems', 'practice', 'history'].forEach(v => {
+    document.getElementById('view-' + v).classList.toggle('hidden', v !== name);
+  });
+  if (name === 'problems') loadProblems();
+  if (name === 'history') loadHistory();
+}
+
+async function loadProblems() {
+  const res = await fetch('/api/problems');
+  const problems = await res.json();
+  const list = document.getElementById('problem-list');
+  list.innerHTML = '';
+  problems.forEach(p => {
+    const div = document.createElement('div');
+    div.className = 'problem-card';
+    div.innerHTML = `<strong>${p.title}</strong><p class="muted">${p.prompt}</p>`;
+    div.onclick = () => startAttempt(p);
+    list.appendChild(div);
+  });
+}
+
+async function startAttempt(problem) {
+  currentProblem = problem;
+  const res = await fetch('/api/attempts', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({problem_id: problem.id})
+  });
+  const attempt = await res.json();
+  currentAttemptId = attempt.id;
+
+  document.getElementById('practice-title').innerText = problem.title;
+  document.getElementById('practice-prompt').innerText = problem.prompt;
+  document.getElementById('practice-requirements').innerText = problem.requirements;
+  document.getElementById('practice-constraints').innerText = problem.constraints;
+  document.getElementById('submission-text').value = '';
+  document.getElementById('feedback-area').innerHTML = '';
+  document.getElementById('submit-status').innerText = '';
+  showView('practice');
+}
+
+async function submitSolution() {
+  const content = document.getElementById('submission-text').value;
+  if (content.trim().length === 0) { alert('Write something first.'); return; }
+
+  document.getElementById('submit-status').innerText = 'Submitting...';
+  const res = await fetch(`/api/attempts/${currentAttemptId}/submissions`, {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({content})
+  });
+  const submission = await res.json();
+  document.getElementById('submit-status').innerText = 'Submitted — evaluating...';
+  pollEvaluation(submission.id);
+}
+
+async function pollEvaluation(submissionId) {
+  if (pollHandle) clearInterval(pollHandle);
+  pollHandle = setInterval(async () => {
+    const res = await fetch(`/api/attempts/${currentAttemptId}/submissions/${submissionId}/evaluation`);
+    if (res.status !== 200) return;
+    const ev = await res.json();
+    renderFeedback(ev);
+    if (ev.status === 'COMPLETED' || ev.status === 'FAILED') {
+      clearInterval(pollHandle);
+      document.getElementById('submit-status').innerText = '';
+    }
+  }, 1500);
+}
+
+function renderFeedback(ev) {
+  const area = document.getElementById('feedback-area');
+  let html = `<h3>Evaluation <span class="status-badge ${ev.status}">${ev.status}</span></h3>`;
+  if (ev.status === 'FAILED') {
+    html += `<p class="muted">${ev.error_message || 'Evaluation failed.'}</p>`;
+  } else if (ev.status === 'COMPLETED') {
+    html += `<p>${ev.overall_summary || ''}</p>`;
+    ev.feedback_items.forEach(item => {
+      html += `<div class="criterion">
+        <div><strong>${item.criterion}</strong> — <span class="score">${item.score}/5</span></div>
+        <div class="muted">Evidence: ${item.evidence}</div>
+        ${item.concern ? `<div>Concern: ${item.concern}</div>` : ''}
+        ${item.suggestion ? `<div>Suggestion: ${item.suggestion}</div>` : ''}
+      </div>`;
+    });
+  } else {
+    html += `<p class="muted">Working on it...</p>`;
+  }
+  area.innerHTML = html;
+}
+
+async function loadHistory() {
+  const res = await fetch('/api/history');
+  const rows = await res.json();
+  const body = document.getElementById('history-body');
+  body.innerHTML = '';
+  rows.forEach(r => {
+    const ev = r.latest_evaluation;
+    let avgScore = '-';
+    if (ev && ev.feedback_items && ev.feedback_items.length > 0) {
+      const total = ev.feedback_items.reduce((s, i) => s + i.score, 0);
+      avgScore = (total / ev.feedback_items.length).toFixed(1);
+    }
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${r.problem_title}</td>
+      <td>v${r.latest_submission ? r.latest_submission.version : '-'}</td>
+      <td><span class="status-badge ${ev ? ev.status : ''}">${ev ? ev.status : 'N/A'}</span></td>
+      <td>${avgScore}</td>
+      <td><button onclick="reopenAttempt('${r.attempt_id}', '${r.problem_id}')">Reopen</button></td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+async function reopenAttempt(attemptId, problemId) {
+  const res = await fetch(`/api/problems/${problemId}`);
+  const problem = await res.json();
+  currentAttemptId = attemptId;
+  currentProblem = problem;
+  document.getElementById('practice-title').innerText = problem.title;
+  document.getElementById('practice-prompt').innerText = problem.prompt;
+  document.getElementById('practice-requirements').innerText = problem.requirements;
+  document.getElementById('practice-constraints').innerText = problem.constraints;
+  document.getElementById('submission-text').value = '';
+  document.getElementById('feedback-area').innerHTML = '<p class="muted">Write a new attempt (retry) below, or check History for past results.</p>';
+  showView('practice');
+}
+
+showView('problems');
+</script>
+</body>
+</html>
