@@ -17,12 +17,21 @@ Two layers of checking, per the helping guide (section 6):
      against the fixed rubric in services/rubric.py with required
      structured output (criterion -> score -> evidence -> concern ->
      suggestion), never an unconstrained "rate this design" prompt.
+
+SDK note (2026-09): this uses the current `google-genai` package
+(`from google import genai`), NOT the legacy `google-generativeai`
+package. The legacy package's support (including bug fixes) ended
+2025-11-30 and it isn't declared in requirements.txt -- importing it
+here would work only on a machine that happens to already have it
+installed, and break with ModuleNotFoundError anywhere else.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import re
+import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 
@@ -107,32 +116,83 @@ class EvaluatorError(Exception):
     """Raised when an evaluator fails to produce a usable result."""
 
 
+# ---------------------------------------------------------------------------
+# Retry helper for transient rate-limit (429) errors
+# ---------------------------------------------------------------------------
+
+MAX_RETRIES = 3
+DEFAULT_BACKOFF_SECONDS = 2.0  # used when the API doesn't tell us how long to wait
+
+# Matches Google's error payload, e.g. "retry_delay { seconds: 3 }"
+_RETRY_DELAY_PATTERN = re.compile(r"retry_delay\s*\{\s*seconds:\s*(\d+)")
+# Fallback: matches "Please retry in 3.30s" style messages
+_RETRY_IN_PATTERN = re.compile(r"retry in ([\d.]+)s", re.IGNORECASE)
+
+
+def _is_rate_limit_error(exc: Exception) -> bool:
+    text = str(exc)
+    return "429" in text or "RESOURCE_EXHAUSTED" in text or "quota" in text.lower()
+
+
+def _suggested_retry_delay(exc: Exception, attempt: int) -> float:
+    """Use the delay Google's error suggests, if present; otherwise back off."""
+    text = str(exc)
+    match = _RETRY_DELAY_PATTERN.search(text) or _RETRY_IN_PATTERN.search(text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return DEFAULT_BACKOFF_SECONDS * (2 ** attempt)  # exponential fallback
+
+
+def _call_with_retry(fn):
+    """
+    Runs fn() with retries on rate-limit errors only. Any other exception
+    (auth failure, malformed request, etc.) is raised immediately -- retrying
+    those would just waste time and hide the real problem.
+    """
+    last_exc: Exception | None = None
+    for attempt in range(MAX_RETRIES):
+        try:
+            return fn()
+        except Exception as exc:  # noqa: BLE001 - re-raised/wrapped below
+            last_exc = exc
+            if not _is_rate_limit_error(exc) or attempt == MAX_RETRIES - 1:
+                raise
+            time.sleep(_suggested_retry_delay(exc, attempt))
+    raise last_exc
+
+
+# ---------------------------------------------------------------------------
+# AI rubric evaluator (Gemini)
+# ---------------------------------------------------------------------------
+
+DEFAULT_GEMINI_MODEL = "gemini-3.5-flash-lite"
 
 
 class AIRubricEvaluator(Evaluator):
     """
-    Uses the Gemini API with a fixed rubric and forced structured
-    (JSON) output. 
+    Uses the Gemini API (current google-genai SDK) with a fixed rubric and
+    forced structured (JSON) output. Deliberately does NOT ask an
+    open-ended "how good is this design?" question -- see helping guide
+    section 7.
     """
 
-    name = "ai-rubric-gemini-3.5-flash-lite"
-
-    def __init__(self, model: str = "gemini-3.5-flash-lite", client=None):
-        self.model = model
-        self._client = client  
+    def __init__(self, model: str | None = None, client=None):
+        self.model = model or os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL)
+        self.name = f"ai-rubric-{self.model}"
+        self._client = client  # injected in tests to avoid real API calls
 
     def _get_client(self):
         if self._client is not None:
             return self._client
-        import google.generativeai as genai
-        api_key = os.environ.get("GEMINI_API_KEY") 
+        from google import genai  # local import so the module loads even without the package during tests
+
+        api_key = os.environ.get("GEMINI_API_KEY")
         if not api_key:
             raise ValueError("API key not found. Please set GEMINI_API_KEY in your .env")
-
-        genai.configure(api_key = api_key)
-        return genai 
-
-        
+        return genai.Client(api_key=api_key)
 
     def _build_prompt(self, problem_prompt: str, requirements: str, submission_content: str) -> str:
         criteria_desc = "\n".join(
@@ -174,20 +234,23 @@ Respond with ONLY valid JSON, no markdown fences, no preamble, in exactly this s
 Include exactly one item per criterion listed above."""
 
     def evaluate(self, problem_prompt: str, requirements: str, submission_content: str) -> EvaluationResult:
-        genai = self._get_client()
+        client = self._get_client()
         prompt = self._build_prompt(problem_prompt, requirements, submission_content)
 
-        try:
-            model = genai.GenerativeModel(self.model)
-            response = model.generate_content(
-                prompt,
-                generation_config = genai.GenerationConfig(
-                    response_mime_type = "application/json",
-                    max_output_tokens = 2000
-                )
+        def _do_call():
+            return client.models.generate_content(
+                model=self.model,
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "max_output_tokens": 2000,
+                },
             )
+
+        try:
+            response = _call_with_retry(_do_call)
             raw_text = response.text
-        except Exception as exc:  # network/auth/rate-limit errors etc.
+        except Exception as exc:  # network/auth/rate-limit (after retries) etc.
             raise EvaluatorError(f"AI evaluator request failed: {exc}") from exc
 
         return self._parse_response(raw_text)
