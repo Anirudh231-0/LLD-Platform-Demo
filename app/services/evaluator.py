@@ -117,9 +117,9 @@ class AIRubricEvaluator(Evaluator):
     (JSON) output. 
     """
 
-    name = "ai-rubric-gemini-3.8-flash"
+    name = "ai-rubric-gemini-3.5-flash-lite"
 
-    def __init__(self, model: str = "gemini-3.8-flash", client=None):
+    def __init__(self, model: str = "gemini-3.5-flash-lite", client=None):
         self.model = model
         self._client = client  
 
