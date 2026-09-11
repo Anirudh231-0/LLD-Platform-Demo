@@ -29,9 +29,18 @@
   .verdict-weakness { background: #fbe9e7; color: #c0392b; }
   .verdict-mixed { background: #fff4e0; color: #a66a00; }
 
-  .deep-dive { margin-top: 16px; border-top: 2px solid #eee; padding-top: 12px; }
-  .criterion-detail { border-top: 1px solid #eee; padding: 10px 0; }
-  .criterion-detail:first-child { border-top: none; }
+  .criterion-row { cursor: pointer; }
+  .criterion-row:hover { background: #f7f9fc; }
+  .expand-arrow { display: inline-block; width: 1em; transition: transform 0.15s ease; color: #999; }
+  .detail-row td { background: #fafbfd; padding: 0; border-bottom: 1px solid #eee; }
+  .criterion-detail { padding: 10px 16px 14px 16px; }
+
+  .suggestions-box { background: #f0f7ff; border: 1px solid #cfe3fc; border-radius: 8px; padding: 14px 16px; margin-top: 14px; }
+  .suggestions-box h4 { margin: 0 0 8px 0; font-size: 0.9rem; }
+  .suggestions-list { margin: 0; padding-left: 20px; }
+  .suggestions-list li { margin-bottom: 10px; }
+  .suggestions-list li:last-child { margin-bottom: 0; }
+  .suggestion-criterion { font-weight: 600; }
 
   .reopened-banner { background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 0.9rem; }
 </style>
@@ -171,9 +180,6 @@ async function pollEvaluation(submissionId) {
   }, 1500);
 }
 
-// Renders the AI's response as a scannable strengths/weaknesses table,
-// with a "deeper dive" toggle for the full per-criterion evidence,
-// concerns, and suggestions.
 function renderFeedback(ev) {
   const area = document.getElementById('feedback-area');
   let html = `<h3>Evaluation <span class="status-badge ${ev.status}">${ev.status}</span></h3>`;
@@ -184,41 +190,67 @@ function renderFeedback(ev) {
     html += `<p>${ev.overall_summary || ''}</p>`;
 
     html += `<table class="rubric-table"><thead><tr>
-      <th>Criterion</th><th>Score</th><th>Verdict</th>
+      <th></th><th>Criterion</th><th>Score</th><th>Verdict</th>
     </tr></thead><tbody>`;
     ev.feedback_items.forEach(item => {
       const v = verdictFor(item.score);
-      html += `<tr>
+      const key = item.criterion;
+      html += `<tr class="criterion-row" onclick="toggleCriterionRow('${key}')">
+        <td class="expand-arrow" id="arrow-${key}">&rsaquo;</td>
         <td>${criterionLabel(item.criterion)}</td>
         <td class="score">${item.score}/5</td>
         <td><span class="verdict-badge ${v.cls}">${v.label}</span></td>
+      </tr>
+      <tr class="detail-row hidden" id="detail-row-${key}">
+        <td colspan="4">
+          <div class="criterion-detail">
+            <div><b>Evidence</b>: ${item.evidence}</div>
+            ${item.concern ? `<div><b>Concern</b>: ${item.concern}</div>` : ''}
+            ${item.suggestion ? `<div><b>Suggestion</b>: ${item.suggestion}</div>` : ''}
+          </div>
+        </td>
       </tr>`;
     });
     html += `</tbody></table>`;
 
-    html += `<p><button class="link" onclick="toggleDeepDive()">Show full breakdown &darr;</button></p>`;
-    html += `<div id="deep-dive" class="deep-dive hidden">`;
-    ev.feedback_items.forEach(item => {
-      html += `<div class="criterion-detail">
-        <div><strong>${criterionLabel(item.criterion)}</strong> — <span class="score">${item.score}/5</span></div>
-        <div class="muted">Evidence: ${item.evidence}</div>
-        ${item.concern ? `<div>Concern: ${item.concern}</div>` : ''}
-        ${item.suggestion ? `<div>Suggestion: ${item.suggestion}</div>` : ''}
-      </div>`;
-    });
-    html += `</div>`;
+    html += renderSuggestions(ev.feedback_items);
   } else {
     html += `<p class="muted">Working on it...</p>`;
   }
   area.innerHTML = html;
 }
 
-function toggleDeepDive() {
-  const el = document.getElementById('deep-dive');
-  const btn = document.querySelector('#feedback-area button.link');
-  const opening = el.classList.contains('hidden');
-  el.classList.toggle('hidden');
-  if (btn) btn.innerText = opening ? 'Hide full breakdown ↑' : 'Show full breakdown ↓';
+function toggleCriterionRow(key) {
+  const detailRow = document.getElementById(`detail-row-${key}`);
+  const arrow = document.getElementById(`arrow-${key}`);
+  const opening = detailRow.classList.contains('hidden');
+  detailRow.classList.toggle('hidden');
+  arrow.style.transform = opening ? 'rotate(90deg)' : 'rotate(0deg)';
+}
+
+function renderSuggestions(items) {
+  const withSuggestions = items
+    .filter(item => item.suggestion && item.score < 5)
+    .sort((a, b) => a.score - b.score);
+
+  if (withSuggestions.length === 0) {
+    return `<div class="suggestions-box">
+      <h4>Suggestions to improve your score</h4>
+      <p class="muted">No specific suggestions — this submission scored well across every criterion.</p>
+    </div>`;
+  }
+
+  const rows = withSuggestions.map(item => `
+    <li>
+      <span class="suggestion-criterion">${criterionLabel(item.criterion)}</span>
+      <div>${item.suggestion}</div>
+    </li>
+  `).join('');
+
+  return `<div class="suggestions-box">
+    <h4>Suggestions to improve your score</h4>
+    <ol class="suggestions-list">${rows}</ol>
+  </div>`;
 }
 
 async function loadHistory() {

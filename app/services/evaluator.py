@@ -113,9 +113,8 @@ class EvaluatorError(Exception):
 
 class AIRubricEvaluator(Evaluator):
     """
-    Uses the Anthropic API with a fixed rubric and forced structured
-    (JSON) output. Deliberately does NOT ask an open-ended "how good
-    is this design?" question -- see helping guide section 7.
+    Uses the Gemini API with a fixed rubric and forced structured
+    (JSON) output. 
     """
 
     name = "ai-rubric-gemini-3.8-flash"
