@@ -107,9 +107,7 @@ class EvaluatorError(Exception):
     """Raised when an evaluator fails to produce a usable result."""
 
 
-# ---------------------------------------------------------------------------
-# AI rubric evaluator (Claude)
-# ---------------------------------------------------------------------------
+
 
 class AIRubricEvaluator(Evaluator):
     """
